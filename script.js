@@ -1,86 +1,75 @@
 const express = require('express');
 const axios = require('axios');
 const bodyParser = require('body-parser');
-require('dotenv').config();
 
 const app = express();
 app.use(bodyParser.json());
 
 const HASURA_ENDPOINT = 'http://localhost:8080/v1/graphql';
-const HASURA_ADMIN_SECRET = process.env.HASURA_ADMIN_SECRET;
+const HASURA_SECRET = 'youradminsecretkey';
 
-// Middleware to check balance and authorize transactions
-const checkBalance = async (req, res, next) => {
-    const { user_id, amount, type } = req.body;
-
-    if (type === 'withdraw') {
-        try {
-            const response = await axios.post(HASURA_ENDPOINT, {
-                query: `
-                    query ($id: Int!) {
-                        users_by_pk(id: $id) {
-                            balance
-                        }
-                    }
-                `,
-                variables: { id: user_id },
-            }, {
-                headers: {
-                    'x-hasura-admin-secret': HASURA_ADMIN_SECRET,
-                }
-            });
-
-            const balance = response.data.data.users_by_pk.balance;
-            if (balance < amount) {
-                return res.status(400).json({ error: 'Insufficient funds' });
-            }
-        } catch (error) {
-            return res.status(500).json({ error: 'Internal server error' });
-        }
-    }
-
-    next();
+const queryHasura = async (query, variables) => {
+  try {
+    const response = await axios.post(
+      HASURA_ENDPOINT,
+      { query, variables },
+      { headers: { 'x-hasura-admin-secret': HASURA_SECRET } }
+    );
+    return response.data;
+  } catch (error) {
+    throw error;
+  }
 };
 
-// Route to handle transactions
-app.post('/transaction', checkBalance, async (req, res) => {
-    const { user_id, amount, type } = req.body;
+app.post('/deposit', async (req, res) => {
+  const { userId, amount } = req.body;
 
-    try {
-        // Add transaction
-        await axios.post(HASURA_ENDPOINT, {
-            query: `
-                mutation ($user_id: Int!, $amount: numeric!, $type: String!) {
-                    insert_transactions_one(object: {user_id: $user_id, amount: $amount, type: $type}) {
-                        id
-                    }
-                }
-            `,
-            variables: { user_id, amount, type },
-        }, {
-            headers: {
-                'x-hasura-admin-secret': HASURA_ADMIN_SECRET,
-            }
-        });
+  const query = `
+    mutation Deposit($userId: Int!, $amount: numeric!) {
+      insert_transactions(objects: {user_id: $userId, amount: $amount, type: "deposit"}) {
+        returning {
+          id
+        }
+      }
+      update_users(where: {id: {_eq: $userId}}, _inc: {balance: $amount}) {
+        affected_rows
+      }
+    }
+  `;
 
-        // Update user balance
-        const operation = type === 'deposit' ? '+' : '-';
-        await axios.post(HASURA_ENDPOINT, {
-            query: `
-                mutation ($id: Int!, $amount: numeric!) {
-                    update_users_by_pk(pk_columns: {id: $id}, _set: {balance: ${operation} $amount}) {
-                        id
-                        balance
-                    }
-                }
-            `,
-            variables: { id: user_id, amount },
-        }, {
-            headers: {
-                'x-hasura-admin-secret': HASURA_ADMIN_SECRET,
-            }
-        });
+  try {
+    const result = await queryHasura(query, { userId, amount });
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
-        res.status(200).json({ message: 'Transaction successful' });
-    } catch (error) {
-        res.status(500).
+app.post('/withdraw', async (req, res) => {
+  const { userId, amount } = req.body;
+
+  const query = `
+    mutation Withdraw($userId: Int!, $amount: numeric!) {
+      insert_transactions(objects: {user_id: $userId, amount: $amount, type: "withdrawal"}) {
+        returning {
+          id
+        }
+      }
+      update_users(where: {id: {_eq: $userId}}, _inc: {balance: -$amount}) {
+        affected_rows
+      }
+    }
+  `;
+
+  try {
+    const result = await queryHasura(query, { userId, amount });
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.listen(3000, () => {
+  console.log('Server running on port 3000');
+});
+
